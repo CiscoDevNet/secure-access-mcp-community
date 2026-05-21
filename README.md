@@ -1,4 +1,4 @@
-# Cisco Secure Access MCP Server
+# Community MCP Server for Cisco Secure Access
 
 A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that exposes Cisco Secure Access API operations as agent-callable tools over **Streamable HTTP**.
 
