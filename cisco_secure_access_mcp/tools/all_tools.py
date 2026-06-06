@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from datetime import datetime
 from typing import Any
@@ -22,7 +23,38 @@ DEPLOYMENTS_SCOPE = "deployments/v2"
 
 ORG_DESTINATION_LIMIT = 250_000
 DEFAULT_PAGE_SIZE = 100
+ACCESS_RULES_PAGE_SIZE = 1000
 BATCH_LIMIT = 500
+MAX_NAME_LENGTH = 255
+MAX_DESTINATION_LENGTH = 253
+
+ACCESS_TYPES = {"allow", "block", "url_proxy", "no_decrypt", "warn", "none"}
+
+# Standard MCP tool annotation presets so clients can distinguish safe reads from
+# state-changing or destructive operations.
+READ_ONLY = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+WRITE_CREATE = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
+WRITE_UPDATE = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}
+DESTRUCTIVE = {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True}
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+# Two-stage commit for destructive actions: when enabled (default), destructive
+# tools require an explicit confirm=true and otherwise return a preview.  The LLM
+# must not be relied on for authorization, so this is a server-side gate.
+REQUIRE_CONFIRMATION = _env_bool("SECURE_ACCESS_REQUIRE_CONFIRMATION", default=True)
+
+# Opt-in PII redaction for report/activity outputs (identities, IPs, emails).
+REDACT_PII = _env_bool("SECURE_ACCESS_REDACT_PII", default=False)
+
+_PII_KEY_HINTS = ("identity", "identities", "internalip", "externalip", "email", "user", "device", "ip")
+_REDACTED = "***REDACTED***"
 
 
 def _get_client(ctx: Context) -> SecureAccessClient:
@@ -34,46 +66,93 @@ def _json(data: Any) -> str:
     return compact_json(data)
 
 
+def _validate_access(access: str) -> str:
+    normalized = access.strip().lower()
+    if normalized not in ACCESS_TYPES:
+        raise ValueError(f"access must be one of {sorted(ACCESS_TYPES)}, got {access!r}")
+    return normalized
+
+
+def _validate_name(name: str) -> str:
+    cleaned = name.strip()
+    if not cleaned:
+        raise ValueError("name must not be empty")
+    if len(cleaned) > MAX_NAME_LENGTH:
+        raise ValueError(f"name must be ≤{MAX_NAME_LENGTH} characters, got {len(cleaned)}")
+    return cleaned
+
+
+def _validate_destinations(destinations: list[str]) -> list[str]:
+    cleaned: list[str] = []
+    for d in destinations:
+        d = (d or "").strip()
+        if not d:
+            raise ValueError("destination entries must not be empty")
+        if len(d) > MAX_DESTINATION_LENGTH:
+            raise ValueError(f"destination must be ≤{MAX_DESTINATION_LENGTH} characters, got {len(d)}")
+        cleaned.append(d)
+    if not cleaned:
+        raise ValueError("at least one destination is required")
+    return cleaned
+
+
+def _redact_pii(obj: Any) -> Any:
+    """Mask values under PII-like keys.  Best-effort defense-in-depth."""
+    if isinstance(obj, dict):
+        result: dict[str, Any] = {}
+        for key, value in obj.items():
+            if any(hint in key.lower() for hint in _PII_KEY_HINTS) and not isinstance(value, (dict, list)):
+                result[key] = _REDACTED if value not in (None, "", 0) else value
+            else:
+                result[key] = _redact_pii(value)
+        return result
+    if isinstance(obj, list):
+        return [_redact_pii(item) for item in obj]
+    return obj
+
+
+def _maybe_redact(data: Any) -> Any:
+    return _redact_pii(data) if REDACT_PII else data
+
+
 async def _get_all_destination_lists(client: SecureAccessClient) -> list[dict[str, Any]]:
-    destination_lists: list[dict[str, Any]] = []
-    page = 1
-    while True:
-        data = await client.get(
-            POLICIES_SCOPE,
-            "destinationlists",
-            params={"page": page, "limit": DEFAULT_PAGE_SIZE},
-        )
-        page_items = data.get("data", [])
-        destination_lists.extend(page_items)
-        total = data.get("meta", {}).get("total", len(page_items))
-        if len(destination_lists) >= total or not page_items:
-            break
-        page += 1
-    return destination_lists
+    return await client.paginate(POLICIES_SCOPE, "destinationlists", page_size=DEFAULT_PAGE_SIZE)
 
 
 async def _get_all_destinations(client: SecureAccessClient, destination_list_id: int) -> list[dict[str, Any]]:
-    destinations: list[dict[str, Any]] = []
-    page = 1
-    while True:
-        data = await client.get(
-            POLICIES_SCOPE,
-            f"destinationlists/{destination_list_id}/destinations",
-            params={"page": page, "limit": DEFAULT_PAGE_SIZE},
-        )
-        page_items = data.get("data", [])
-        destinations.extend(page_items)
-        total = data.get("meta", {}).get("total", len(page_items))
-        if len(destinations) >= total or not page_items:
-            break
-        page += 1
-    return destinations
+    return await client.paginate(
+        POLICIES_SCOPE,
+        f"destinationlists/{destination_list_id}/destinations",
+        page_size=DEFAULT_PAGE_SIZE,
+    )
+
+
+async def _get_all_access_rules(client: SecureAccessClient) -> list[dict[str, Any]]:
+    return await client.paginate_offset(
+        POLICIES_SCOPE,
+        "rules",
+        page_size=ACCESS_RULES_PAGE_SIZE,
+        max_page_size=ACCESS_RULES_PAGE_SIZE,
+        data_key=("results", "data"),
+    )
+
+
+async def _get_all_roaming_computers(client: SecureAccessClient) -> list[dict[str, Any]]:
+    return await client.paginate(DEPLOYMENTS_SCOPE, "roamingcomputers", page_size=DEFAULT_PAGE_SIZE)
+
+
+async def _get_all_internal_networks(client: SecureAccessClient) -> list[dict[str, Any]]:
+    return await client.paginate(DEPLOYMENTS_SCOPE, "internalnetworks", page_size=DEFAULT_PAGE_SIZE)
+
+
+async def _get_all_network_tunnels(client: SecureAccessClient) -> list[dict[str, Any]]:
+    return await client.paginate_offset(DEPLOYMENTS_SCOPE, "networktunnelgroups", page_size=DEFAULT_PAGE_SIZE)
 
 
 async def _reports_get(ctx: Context, path: str, params: dict[str, Any]) -> str:
     client = _get_client(ctx)
     data = await client.request_url("GET", f"{API_BASE_URL}{path}", params=params)
-    return _json(data)
+    return _json(_maybe_redact(data))
 
 
 def _time_params(from_time: str, to_time: str, limit: int | None = None) -> dict[str, Any]:
@@ -131,6 +210,7 @@ async def get_destinations_in_list(destination_list_id: int, ctx: Context) -> st
 
 
 @mcp.tool()
+@mcp.tool(annotations=WRITE_CREATE)
 async def create_destination_list(
     name: str,
     ctx: Context,
@@ -140,44 +220,64 @@ async def create_destination_list(
     """Create a new destination list with optional initial destinations."""
     try:
         body: dict[str, Any] = {
-            "access": access.lower(),
+            "access": _validate_access(access),
             "bundleTypeId": 2,
             "isGlobal": False,
-            "name": name,
+            "name": _validate_name(name),
         }
         if destinations:
-            body["destinations"] = [{"destination": destination} for destination in destinations[:BATCH_LIMIT]]
+            cleaned = _validate_destinations(destinations[:BATCH_LIMIT])
+            body["destinations"] = [{"destination": destination} for destination in cleaned]
         data = await _get_client(ctx).post(POLICIES_SCOPE, "destinationlists", json_data=body)
         return _json(data)
     except Exception as e:
         return format_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE_UPDATE)
 async def update_destination_list(destination_list_id: int, name: str, ctx: Context) -> str:
     """Rename a destination list by its numeric ID."""
     try:
         data = await _get_client(ctx).patch(
             POLICIES_SCOPE,
             f"destinationlists/{destination_list_id}",
-            json_data={"name": name},
+            json_data={"name": _validate_name(name)},
         )
         return _json(data)
     except Exception as e:
         return format_error(e)
 
 
-@mcp.tool()
-async def delete_destination_list(destination_list_id: int, ctx: Context) -> str:
-    """Delete a destination list by its numeric ID. This action cannot be undone."""
+@mcp.tool(annotations=DESTRUCTIVE)
+async def delete_destination_list(destination_list_id: int, ctx: Context, confirm: bool = False) -> str:
+    """Delete a destination list by its numeric ID. This action cannot be undone.
+
+    This is a destructive, irreversible action.  Unless confirmation is disabled
+    server-side, you must call again with confirm=true to actually delete; the
+    first call returns a preview of what would be deleted.
+    """
     try:
+        if REQUIRE_CONFIRMATION and not confirm:
+            preview = await _get_client(ctx).get(
+                POLICIES_SCOPE, f"destinationlists/{destination_list_id}"
+            )
+            target = preview.get("data", preview) if isinstance(preview, dict) else preview
+            return _json(
+                {
+                    "confirmationRequired": True,
+                    "action": "delete_destination_list",
+                    "warning": "This permanently deletes the destination list and cannot be undone.",
+                    "target": target,
+                    "howToConfirm": "Call this tool again with confirm=true to proceed.",
+                }
+            )
         data = await _get_client(ctx).delete(POLICIES_SCOPE, f"destinationlists/{destination_list_id}")
         return _json(data) if data else "Destination list deleted successfully."
     except Exception as e:
         return format_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE_CREATE)
 async def add_destinations_to_list(
     destination_list_id: int,
     destinations: list[str],
@@ -186,9 +286,10 @@ async def add_destinations_to_list(
 ) -> str:
     """Add destinations (domains, IPs, or URLs) to a destination list. Max 500 per request."""
     try:
+        cleaned = _validate_destinations(destinations[:BATCH_LIMIT])
         items = [
             {"destination": destination, **({"comment": comment} if comment else {})}
-            for destination in destinations[:BATCH_LIMIT]
+            for destination in cleaned
         ]
         data = await _get_client(ctx).post(
             POLICIES_SCOPE,
@@ -200,18 +301,39 @@ async def add_destinations_to_list(
         return format_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=DESTRUCTIVE)
 async def remove_destinations_from_list(
     destination_list_id: int,
     destination_ids: list[int],
     ctx: Context,
+    confirm: bool = False,
 ) -> str:
-    """Remove destinations from a list by their numeric IDs. Max 500 per request."""
+    """Remove destinations from a list by their numeric IDs. Max 500 per request.
+
+    Destructive action.  Unless confirmation is disabled server-side, you must
+    call again with confirm=true; the first call returns a preview of how many
+    destinations would be removed.
+    """
     try:
+        ids = destination_ids[:BATCH_LIMIT]
+        if not ids:
+            raise ValueError("at least one destination_id is required")
+        if REQUIRE_CONFIRMATION and not confirm:
+            return _json(
+                {
+                    "confirmationRequired": True,
+                    "action": "remove_destinations_from_list",
+                    "destinationListId": destination_list_id,
+                    "destinationIdCount": len(ids),
+                    "destinationIds": ids,
+                    "warning": "This removes the listed destinations from the list.",
+                    "howToConfirm": "Call this tool again with confirm=true to proceed.",
+                }
+            )
         data = await _get_client(ctx).delete(
             POLICIES_SCOPE,
             f"destinationlists/{destination_list_id}/destinations/remove",
-            json_data=destination_ids[:BATCH_LIMIT],
+            json_data=ids,
         )
         return _json(data) if data else "Destinations removed successfully."
     except Exception as e:
@@ -432,8 +554,7 @@ async def get_domain_categorization(domain: str, ctx: Context) -> str:
 async def list_access_rules(ctx: Context) -> str:
     """List all access policy rules."""
     try:
-        data = await _get_client(ctx).get(POLICIES_SCOPE, "rules", params={"offset": 0, "limit": 100})
-        rules = data.get("results", data.get("data", []))
+        rules = await _get_all_access_rules(_get_client(ctx))
         return _json({"count": len(rules), "rules": rules})
     except Exception as e:
         return format_error(e)
@@ -469,7 +590,7 @@ async def get_access_rule_detail(rule_id: int, ctx: Context) -> str:
         return format_error(e)
 
 
-@mcp.tool()
+@mcp.tool(annotations=WRITE_CREATE)
 async def create_access_rule(
     rule_name: str,
     action: str,
@@ -480,7 +601,10 @@ async def create_access_rule(
 ) -> str:
     """Create a new access rule by content categories or destination lists."""
     try:
-        normalized_action = action.upper()
+        normalized_action = action.strip().upper()
+        if normalized_action not in {"ALLOW", "BLOCK"}:
+            raise ValueError(f"action must be 'allow' or 'block', got {action!r}")
+        rule_name = _validate_name(rule_name)
         conditions: list[dict[str, Any]] = [
             {
                 "attributeName": "umbrella.source.all",
@@ -1172,8 +1296,8 @@ async def get_activity_decryption(
 async def list_roaming_computers(ctx: Context) -> str:
     """List all roaming computers registered in the organization."""
     try:
-        data = await _get_client(ctx).get(DEPLOYMENTS_SCOPE, "roamingcomputers", params={"page": 1, "limit": 100})
-        return _json(data)
+        computers = await _get_all_roaming_computers(_get_client(ctx))
+        return _json({"count": len(computers), "roaming_computers": computers})
     except Exception as e:
         return format_error(e)
 
@@ -1182,8 +1306,8 @@ async def list_roaming_computers(ctx: Context) -> str:
 async def list_internal_networks(ctx: Context) -> str:
     """List internal networks configured in the organization."""
     try:
-        data = await _get_client(ctx).get(DEPLOYMENTS_SCOPE, "internalnetworks", params={"page": 1, "limit": 100})
-        return _json(data)
+        networks = await _get_all_internal_networks(_get_client(ctx))
+        return _json({"count": len(networks), "internal_networks": networks})
     except Exception as e:
         return format_error(e)
 
@@ -1192,7 +1316,7 @@ async def list_internal_networks(ctx: Context) -> str:
 async def list_network_tunnels(ctx: Context) -> str:
     """List network tunnel groups configured in the organization."""
     try:
-        data = await _get_client(ctx).get(DEPLOYMENTS_SCOPE, "networktunnelgroups", params={"limit": 100, "offset": 0})
-        return _json(data)
+        tunnels = await _get_all_network_tunnels(_get_client(ctx))
+        return _json({"count": len(tunnels), "network_tunnels": tunnels})
     except Exception as e:
         return format_error(e)

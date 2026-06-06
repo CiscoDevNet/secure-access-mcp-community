@@ -143,9 +143,11 @@ secure-access-mcp-community/
 ├── cisco_secure_access_mcp/
 │   ├── __init__.py
 │   ├── __main__.py          # Entry point: python -m cisco_secure_access_mcp
-│   ├── auth.py              # OAuth2 client credentials token manager
-│   ├── client.py            # Async Cisco Secure Access REST client
-│   ├── server.py            # FastMCP Streamable HTTP server
+│   ├── auth.py              # OAuth2 client credentials token manager (cache, refresh, retry)
+│   ├── client.py            # Async Cisco Secure Access REST client (pool, retries, paginate, audit logs)
+│   ├── logging_config.py    # Structured JSON logging + secret redaction
+│   ├── security.py          # Auth, rate limit, payload limit, request IDs (ASGI middleware)
+│   ├── server.py            # FastMCP Streamable HTTP server + security wiring
 │   └── tools/
 │       ├── all_tools.py     # MCP tool definitions
 │       └── destination_lists.py
@@ -166,7 +168,39 @@ secure-access-mcp-community/
 
 ## Installation
 
-Clone the repository and install dependencies:
+### Option A: uv (recommended)
+
+[uv](https://docs.astral.sh/uv/) is a fast Python package and project manager. If you don't have it yet:
+
+```bash
+# macOS / Linux
+curl -LsSf https://astral.sh/uv/install.sh | sh
+# or: brew install uv / pipx install uv
+```
+
+Clone the repository, create a Python 3.11 environment, and install dependencies:
+
+```bash
+git clone https://github.com/CiscoDevNet/secure-access-mcp-community.git
+cd secure-access-mcp-community
+
+# Create a virtual environment pinned to a supported interpreter.
+# uv downloads Python for you if it is not installed locally.
+uv venv --python 3.11
+
+# Install dependencies from requirements.txt into the environment.
+uv pip install -r requirements.txt
+```
+
+Run the server without manually activating the venv:
+
+```bash
+uv run python -m cisco_secure_access_mcp
+```
+
+`uv run` automatically uses the project's `.venv`, so you do not need to `source` anything. You can still activate it the traditional way (`source .venv/bin/activate`) if you prefer.
+
+### Option B: venv + pip
 
 ```bash
 git clone https://github.com/CiscoDevNet/secure-access-mcp-community.git
@@ -194,16 +228,50 @@ cp .env.example .env
 | `TOKEN_URL` | No | `https://api.sse.cisco.com/auth/v2/token` | OAuth token endpoint |
 | `HOST` | No | `127.0.0.1` | Streamable HTTP bind host |
 | `PORT` | No | `8000` | Streamable HTTP bind port |
+| `SECURE_ACCESS_USER_AGENT` | No | `secure-access-mcp-community/<version> (+<repo-url>)` | `User-Agent` sent on every API call so the Cisco backend can attribute traffic to this MCP server |
+| `MCP_AUTH_TOKEN` | Yes* | - | Bearer token MCP clients must send (`Authorization: Bearer <token>`). *Required unless `MCP_ALLOW_NO_AUTH=true` |
+| `MCP_ALLOW_NO_AUTH` | No | `false` | Run with **no client authentication** (testing only, not recommended; loopback host only) |
+| `MCP_MAX_REQUEST_BYTES` | No | `1048576` | Max inbound request body size (large-payload DoS protection) |
+| `MCP_RATE_LIMIT_RPM` | No | `120` | Per-client-IP rate limit (requests/min); `0` disables |
+| `MCP_ALLOWED_HOSTS` | No | bound host + loopback | Comma-separated `Host` allowlist for DNS-rebinding protection |
+| `MCP_ALLOWED_ORIGINS` | No | (none) | Comma-separated `Origin` allowlist |
+| `MCP_DISABLE_DNS_REBINDING_PROTECTION` | No | `false` | Disable Host/Origin validation (testing only) |
+| `SECURE_ACCESS_REQUIRE_CONFIRMATION` | No | `true` | Require `confirm=true` for destructive tools (two-stage commit) |
+| `SECURE_ACCESS_REDACT_PII` | No | `false` | Redact PII (identities, IPs, emails) from report/activity outputs |
+| `LOG_LEVEL` | No | `INFO` | Level for structured JSON logs (written to stderr) |
 
 ## Usage
 
-Run the Streamable HTTP server:
+Generate a strong client token, then run the server (authentication is required by default):
 
 ```bash
 export SECURE_ACCESS_API_KEY="your-api-key"
 export SECURE_ACCESS_API_SECRET="your-api-secret"
+export MCP_AUTH_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
 python -m cisco_secure_access_mcp
 ```
+
+MCP clients must then send `Authorization: Bearer $MCP_AUTH_TOKEN` on every request.
+
+With uv (no manual venv activation needed):
+
+```bash
+export SECURE_ACCESS_API_KEY="your-api-key"
+export SECURE_ACCESS_API_SECRET="your-api-secret"
+export MCP_AUTH_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+uv run python -m cisco_secure_access_mcp
+```
+
+### No-auth testing mode (not recommended)
+
+For isolated local experimentation only, you can start the server without client→server authentication. The server refuses to start without **either** `MCP_AUTH_TOKEN` or this flag, and refuses the no-auth mode on any non-loopback host:
+
+```bash
+# NOT RECOMMENDED: anyone who can reach the port can use your Cisco credentials.
+MCP_ALLOW_NO_AUTH=true python -m cisco_secure_access_mcp
+```
+
+A prominent warning is printed and logged at startup while in this mode.
 
 The server listens at:
 
@@ -223,17 +291,20 @@ Use `127.0.0.1` for local-only access. Use `0.0.0.0` only when you intentionally
 
 Start the server first, then configure your MCP client to connect to the Streamable HTTP URL.
 
-For Streamable HTTP, the recommended setup is to keep credentials in the server process environment or `.env` file and keep MCP client configuration URL-only. This avoids copying secrets into each client configuration file.
+For Streamable HTTP, the recommended setup is to keep Cisco credentials in the server process environment or `.env` file and keep MCP client configuration URL-only. Clients must also present the bearer token from `MCP_AUTH_TOKEN` in the `Authorization` header.
 
 ### Cursor
 
-Add to Cursor MCP settings:
+Add to Cursor MCP settings (replace `YOUR_MCP_AUTH_TOKEN` with the value of `MCP_AUTH_TOKEN`):
 
 ```json
 {
   "mcpServers": {
     "cisco-secure-access": {
-      "url": "http://127.0.0.1:8000/mcp"
+      "url": "http://127.0.0.1:8000/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_MCP_AUTH_TOKEN"
+      }
     }
   }
 }
@@ -248,7 +319,10 @@ Add to `.vscode/mcp.json` or user MCP settings:
   "servers": {
     "cisco-secure-access": {
       "type": "http",
-      "url": "http://127.0.0.1:8000/mcp"
+      "url": "http://127.0.0.1:8000/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_MCP_AUTH_TOKEN"
+      }
     }
   }
 }
@@ -258,6 +332,8 @@ Add to `.vscode/mcp.json` or user MCP settings:
 
 ```bash
 npx @modelcontextprotocol/inspector http://127.0.0.1:8000/mcp
+# Set an "Authorization: Bearer <MCP_AUTH_TOKEN>" header in the Inspector UI,
+# or start the server with MCP_ALLOW_NO_AUTH=true for local-only testing.
 ```
 
 ## Example Queries
@@ -286,25 +362,44 @@ Once connected, ask an MCP-compatible agent questions like:
 ```text
 MCP client
    |
-   | Streamable HTTP
+   | Streamable HTTP + Authorization: Bearer <MCP_AUTH_TOKEN>
    v
-FastMCP server
+Security middleware  (auth, rate limit, payload limit, request IDs, access logs)
    |
    v
-72 MCP tools
+FastMCP server  (DNS-rebinding / Host + Origin validation)
    |
    v
-Async Secure Access client
+72 MCP tools  (input validation, destructive-action confirmation, optional PII redaction)
+   |
+   v
+Async Secure Access client  (token cache/refresh, pooling, retries, audit logs)
    |
    v
 Cisco Secure Access API
 ```
 
+## Security
+
+This server holds privileged Cisco Secure Access credentials, so the Streamable HTTP transport is hardened per the [CoSAI MCP security guidelines](https://modelcontextprotocol.io/):
+
+- **Client→server authentication (required by default).** Every request must carry `Authorization: Bearer <MCP_AUTH_TOKEN>`; the token is compared in constant time. The server refuses to start without either `MCP_AUTH_TOKEN` or the explicit `MCP_ALLOW_NO_AUTH=true` testing flag.
+- **No-auth testing mode (not recommended).** `MCP_ALLOW_NO_AUTH=true` runs without authentication for isolated local testing only; it is rejected on non-loopback hosts and prints/logs a prominent warning.
+- **DNS-rebinding protection.** Host/Origin validation via FastMCP `transport_security`, defaulting to the bound host plus loopback names (`MCP_ALLOWED_HOSTS` / `MCP_ALLOWED_ORIGINS`).
+- **DoS protections.** Inbound payload size cap (`MCP_MAX_REQUEST_BYTES`) and per-client-IP rate limiting (`MCP_RATE_LIMIT_RPM`).
+- **Auditability.** Structured JSON logs (stderr) with per-request correlation IDs (`X-Request-ID`) for transport requests and outbound Cisco API calls. A redaction filter keeps credentials/tokens out of logs.
+- **Safer tools.** Destructive tools (`delete_destination_list`, `remove_destinations_from_list`) use two-stage commit (`confirm=true`) and carry `destructiveHint` annotations; write tools validate inputs server-side (allowlists, length/count caps). Optional PII redaction for report/activity outputs via `SECURE_ACCESS_REDACT_PII`.
+
+Still operator-owned (recommended for production): terminate **TLS/mTLS** at a reverse proxy in front of this server, prefer a secret manager over `.env`, and run the process sandboxed/least-privilege. Rate limiting is per-process — enforce limits at the gateway when running multiple workers.
+
 ## Key Implementation Details
 
 - Streamable HTTP only: the server always starts with `transport="streamable-http"`.
-- OAuth2 token management: `auth.py` caches and refreshes client-credentials tokens.
-- Async HTTP client: `client.py` uses `httpx.AsyncClient` for Cisco Secure Access API calls.
+- OAuth2 token management: `auth.py` caches a single client-credentials token for its full lifetime (≈1 request/hour) and refreshes it ~60s before expiry, with exponential backoff retries on `429`/`5xx`/network errors.
+- Connection pooling: `client.py` keeps one pooled `httpx.AsyncClient` for the whole server lifetime instead of opening a new connection per request, and closes it on shutdown.
+- Automatic retries: rate-limited (`429`) responses are retried for any method (honoring `Retry-After`); `5xx` and transient network failures are retried only for idempotent reads.
+- Pagination: `SecureAccessClient.paginate()` walks every page (`page`/`limit`, capped at 100/page) until a short page, the reported total, an optional `max_items` cap, or the page-count safety cap is reached.
+- User-Agent tracking: every token and API request sends a `User-Agent` (see `get_user_agent()` in `cisco_secure_access_mcp/__init__.py`), overridable via `SECURE_ACCESS_USER_AGENT`, so Cisco can attribute backend traffic to this MCP server.
 - Redirect handling: reports redirects are followed only for HTTPS Cisco-controlled hosts.
 - Response limits: large responses are rejected to avoid oversized tool results.
 - Credentials: API credentials are read from environment variables or `.env`, not source code.

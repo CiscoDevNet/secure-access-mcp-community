@@ -14,9 +14,12 @@ from dataclasses import dataclass
 
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from .auth import TokenManager
 from .client import SecureAccessClient
+from .logging_config import configure_logging, get_logger
+from .security import SecurityConfig, SecurityConfigError, SecurityMiddleware
 
 load_dotenv()
 
@@ -58,7 +61,10 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     )
     client = SecureAccessClient(token_manager)
 
-    yield AppContext(client=client)
+    try:
+        yield AppContext(client=client)
+    finally:
+        await client.aclose()
 
 
 mcp = FastMCP(
@@ -70,13 +76,64 @@ mcp = FastMCP(
 from .tools import all_tools  # noqa: E402, F401
 
 
+def _build_transport_security(host: str, port: int, config: SecurityConfig) -> TransportSecuritySettings:
+    """Configure FastMCP's DNS-rebinding / Host / Origin validation."""
+    allowed_hosts = list(config.allowed_hosts)
+    if not allowed_hosts:
+        # Default to the bound host plus loopback names so a correctly addressed
+        # client works while cross-origin DNS-rebinding attempts are rejected.
+        defaults = {f"{host}:{port}", f"127.0.0.1:{port}", f"localhost:{port}"}
+        allowed_hosts = sorted(defaults)
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=config.enable_dns_rebinding_protection,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=list(config.allowed_origins),
+    )
+
+
 def main() -> None:
     """Entry point for the Streamable HTTP MCP server."""
+    logger = configure_logging(os.environ.get("LOG_LEVEL", "INFO"))
+
     host = os.environ.get("HOST", "127.0.0.1")
     port = int(os.environ.get("PORT", "8000"))
+
+    try:
+        security = SecurityConfig.from_env()
+    except SecurityConfigError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if security.allow_no_auth:
+        warning = (
+            "SECURITY WARNING: running WITHOUT client->server authentication "
+            "(MCP_ALLOW_NO_AUTH=true). This is NOT RECOMMENDED. Anyone who can reach "
+            f"{host}:{port} can invoke every tool using your Cisco Secure Access "
+            "credentials. Use this only for isolated local testing, never in production."
+        )
+        # Emit to stderr (human-visible) and the structured log.
+        print(f"\n*** {warning} ***\n", file=sys.stderr)
+        logger.warning(warning, extra={"event": "startup_no_auth"})
+        if host not in {"127.0.0.1", "localhost", "::1"}:
+            print(
+                "Error: refusing to run the no-auth testing mode on a non-loopback host "
+                f"({host!r}). Bind to 127.0.0.1 for no-auth testing, or set MCP_AUTH_TOKEN.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    logger.info("starting server", extra={"event": "startup", **security.public_summary()})
+
     mcp.settings.host = host
     mcp.settings.port = port
-    mcp.run(transport="streamable-http")
+    mcp.settings.transport_security = _build_transport_security(host, port, security)
+
+    app = mcp.streamable_http_app()
+    app.add_middleware(SecurityMiddleware, config=security)
+
+    import uvicorn
+
+    uvicorn.run(app, host=host, port=port, log_level=os.environ.get("LOG_LEVEL", "info").lower())
 
 
 if __name__ == "__main__":
