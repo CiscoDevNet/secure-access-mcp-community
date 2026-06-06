@@ -381,8 +381,6 @@ Cisco Secure Access API
 
 ## Security
 
-This server holds privileged Cisco Secure Access credentials, so the Streamable HTTP transport is hardened per the [CoSAI MCP security guidelines](https://modelcontextprotocol.io/):
-
 - **Client→server authentication (required by default).** Every request must carry `Authorization: Bearer <MCP_AUTH_TOKEN>`; the token is compared in constant time. The server refuses to start without either `MCP_AUTH_TOKEN` or the explicit `MCP_ALLOW_NO_AUTH=true` testing flag.
 - **No-auth testing mode (not recommended).** `MCP_ALLOW_NO_AUTH=true` runs without authentication for isolated local testing only; it is rejected on non-loopback hosts and prints/logs a prominent warning.
 - **DNS-rebinding protection.** Host/Origin validation via FastMCP `transport_security`, defaulting to the bound host plus loopback names (`MCP_ALLOWED_HOSTS` / `MCP_ALLOWED_ORIGINS`).
