@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from datetime import datetime
 from typing import Any
@@ -53,8 +54,29 @@ REQUIRE_CONFIRMATION = _env_bool("SECURE_ACCESS_REQUIRE_CONFIRMATION", default=T
 # Opt-in PII redaction for report/activity outputs (identities, IPs, emails).
 REDACT_PII = _env_bool("SECURE_ACCESS_REDACT_PII", default=False)
 
-_PII_KEY_HINTS = ("identity", "identities", "internalip", "externalip", "email", "user", "device", "ip")
+# Keys whose (normalized) name means the value is PII and should be redacted.
+# Matching is on whole, normalized key names and on split tokens — never raw
+# substrings — so "description", "recipient", "zip", and "userAgent" are NOT
+# treated as PII the way a naive substring match would.
+_PII_KEYS = frozenset({
+    "identity", "identities", "ip", "internalip", "externalip",
+    "email", "emailaddress", "user", "username", "userid",
+    "device", "deviceid",
+})
+# Tokens that are reliably PII even as one part of a compound key
+# (e.g. "sourceIp", "destination_ip"). Deliberately excludes "user" so that
+# "userAgent" is not redacted.
+_PII_TOKENS = frozenset({"ip", "email", "identity", "identities"})
 _REDACTED = "***REDACTED***"
+
+
+def _is_pii_key(key: str) -> bool:
+    """Return True if a key name denotes PII, using whole-name and token matches."""
+    normalized = key.replace("_", "").replace("-", "").lower()
+    if normalized in _PII_KEYS:
+        return True
+    tokens = re.split(r"[_\-\s]+|(?<=[a-z])(?=[A-Z])", key)
+    return any(token.lower() in _PII_TOKENS for token in tokens)
 
 
 def _get_client(ctx: Context) -> SecureAccessClient:
@@ -101,7 +123,7 @@ def _redact_pii(obj: Any) -> Any:
     if isinstance(obj, dict):
         result: dict[str, Any] = {}
         for key, value in obj.items():
-            if any(hint in key.lower() for hint in _PII_KEY_HINTS) and not isinstance(value, (dict, list)):
+            if _is_pii_key(key) and not isinstance(value, (dict, list)):
                 result[key] = _REDACTED if value not in (None, "", 0) else value
             else:
                 result[key] = _redact_pii(value)
