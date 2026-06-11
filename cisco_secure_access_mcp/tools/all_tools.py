@@ -209,7 +209,6 @@ async def get_destinations_in_list(destination_list_id: int, ctx: Context) -> st
         return format_error(e)
 
 
-@mcp.tool()
 @mcp.tool(annotations=WRITE_CREATE)
 async def create_destination_list(
     name: str,
