@@ -10,6 +10,7 @@ import os
 import time
 from datetime import datetime
 from typing import Any
+from urllib.parse import quote
 
 from mcp.server.fastmcp import Context
 
@@ -18,7 +19,7 @@ from ..server import AppContext, mcp
 
 POLICIES_SCOPE = "policies/v2"
 REPORTS_SCOPE = "reports/v2"
-SECURITY_SCOPE = "security/v1"
+INVESTIGATE_SCOPE = "investigate/v2"
 DEPLOYMENTS_SCOPE = "deployments/v2"
 
 ORG_DESTINATION_LIMIT = 250_000
@@ -528,7 +529,8 @@ async def audit_stale_lists(ctx: Context, stale_days: int = 30) -> str:
 async def investigate_domain(domain: str, ctx: Context) -> str:
     """Get security information for a domain."""
     try:
-        data = await _get_client(ctx).get(SECURITY_SCOPE, f"domains/{domain}/risk-score")
+        safe_domain = quote(domain, safe="")
+        data = await _get_client(ctx).get(INVESTIGATE_SCOPE, f"domains/risk-score/{safe_domain}")
         return _json(data)
     except Exception as e:
         return format_error(e)
@@ -538,7 +540,10 @@ async def investigate_domain(domain: str, ctx: Context) -> str:
 async def get_domain_categorization(domain: str, ctx: Context) -> str:
     """Get the status and content categorization of a domain."""
     try:
-        data = await _get_client(ctx).get(SECURITY_SCOPE, f"domains/{domain}/categorization")
+        safe_domain = quote(domain, safe="")
+        data = await _get_client(ctx).get(
+            INVESTIGATE_SCOPE, f"domains/categorization/{safe_domain}"
+        )
         return _json(data)
     except Exception as e:
         return format_error(e)
