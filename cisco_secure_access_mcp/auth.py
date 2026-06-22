@@ -57,6 +57,7 @@ class TokenManager:
     api_key: str = field(repr=False)
     api_secret: str = field(repr=False)
     token_url: str = DEFAULT_TOKEN_URL
+    org_id: str | None = None
     _access_token: str | None = field(default=None, init=False, repr=False)
     _expires_at: float = field(default=0.0, init=False, repr=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
@@ -86,13 +87,16 @@ class TokenManager:
         for attempt in range(1, MAX_TOKEN_ATTEMPTS + 1):
             try:
                 async with httpx.AsyncClient(timeout=TOKEN_REQUEST_TIMEOUT) as client:
+                    headers = {
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        "User-Agent": get_user_agent(),
+                    }
+                    if self.org_id:
+                        headers["X-Umbrella-OrgId"] = self.org_id
                     response = await client.post(
                         self.token_url,
                         auth=(self.api_key, self.api_secret),
-                        headers={
-                            "Content-Type": "application/x-www-form-urlencoded",
-                            "User-Agent": get_user_agent(),
-                        },
+                        headers=headers,
                         data={"grant_type": "client_credentials"},
                     )
             except (httpx.TimeoutException, httpx.TransportError) as exc:

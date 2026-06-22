@@ -34,6 +34,7 @@ class FakeTokenResponse:
 
 class FakeAsyncClient:
     responses: list[FakeTokenResponse] = []
+    requests: list[dict[str, object]] = []
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         pass
@@ -45,6 +46,7 @@ class FakeAsyncClient:
         pass
 
     async def post(self, *args: object, **kwargs: object) -> FakeTokenResponse:
+        self.requests.append({"args": args, "kwargs": kwargs})
         return self.responses.pop(0)
 
 
@@ -81,6 +83,7 @@ class TokenManagerTests(unittest.IsolatedAsyncioTestCase):
             FakeTokenResponse(429, {}, {"retry-after": "2.5"}),
             FakeTokenResponse(200, {"access_token": "fresh-token", "expires_in": 3600}),
         ]
+        FakeAsyncClient.requests = []
         sleep_calls: list[float] = []
 
         async def fake_sleep(delay: float) -> None:
@@ -95,6 +98,21 @@ class TokenManagerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(token, "fresh-token")
         self.assertEqual(sleep_calls, [2.5])
+
+    async def test_child_org_token_request_sets_umbrella_org_header(self) -> None:
+        FakeAsyncClient.responses = [
+            FakeTokenResponse(200, {"access_token": "child-token", "expires_in": 3600}),
+        ]
+        FakeAsyncClient.requests = []
+
+        token_manager = TokenManager(api_key="api-key", api_secret="api-secret", org_id="1234567")
+        with patch("cisco_secure_access_mcp.auth.httpx.AsyncClient", FakeAsyncClient):
+            token = await token_manager.get_token()
+
+        self.assertEqual(token, "child-token")
+        self.assertEqual(len(FakeAsyncClient.requests), 1)
+        headers = FakeAsyncClient.requests[0]["kwargs"]["headers"]
+        self.assertEqual(headers["X-Umbrella-OrgId"], "1234567")
 
 
 if __name__ == "__main__":
