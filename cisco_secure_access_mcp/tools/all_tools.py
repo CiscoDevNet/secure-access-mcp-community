@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from datetime import datetime
@@ -27,6 +28,8 @@ ACCESS_RULES_PAGE_SIZE = 1000
 BATCH_LIMIT = 500
 MAX_NAME_LENGTH = 255
 MAX_DESTINATION_LENGTH = 253
+MAX_PRIVATE_RESOURCE_NAME_LENGTH = 50
+MAX_PRIVATE_RESOURCE_LIMIT = 1000
 
 ACCESS_TYPES = {"allow", "block", "url_proxy", "no_decrypt", "warn", "none"}
 
@@ -96,6 +99,51 @@ def _validate_destinations(destinations: list[str]) -> list[str]:
     return cleaned
 
 
+def _validate_private_resource_name(name: str) -> str:
+    cleaned = name.strip()
+    if not cleaned:
+        raise ValueError("name must not be empty")
+    if len(cleaned) > MAX_PRIVATE_RESOURCE_NAME_LENGTH:
+        raise ValueError(
+            f"name must be ≤{MAX_PRIVATE_RESOURCE_NAME_LENGTH} characters, got {len(cleaned)}"
+        )
+    return cleaned
+
+
+def _validate_private_resource_access_types(access_types: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not access_types:
+        raise ValueError("access_types must not be empty")
+    for item in access_types:
+        if not isinstance(item, dict):
+            raise ValueError("each access_types item must be an object")
+        if not item.get("type"):
+            raise ValueError("each access_types item must include a non-empty 'type'")
+    return list(access_types)
+
+
+def _validate_private_resource_addresses(resource_addresses: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not resource_addresses:
+        raise ValueError("resource_addresses must not be empty")
+    for item in resource_addresses:
+        if not isinstance(item, dict):
+            raise ValueError("each resource_addresses item must be an object")
+        if "destinationAddr" not in item or "protocolPorts" not in item:
+            raise ValueError(
+                "each resource_addresses item must include 'destinationAddr' and 'protocolPorts'"
+            )
+    return list(resource_addresses)
+
+
+def _validate_private_resource_limit(limit: int | None) -> int | None:
+    if limit is None:
+        return None
+    if limit < 1:
+        raise ValueError("limit must be >= 1")
+    if limit > MAX_PRIVATE_RESOURCE_LIMIT:
+        raise ValueError(f"limit must be <= {MAX_PRIVATE_RESOURCE_LIMIT}")
+    return limit
+
+
 def _redact_pii(obj: Any) -> Any:
     """Mask values under PII-like keys.  Best-effort defense-in-depth."""
     if isinstance(obj, dict):
@@ -147,6 +195,40 @@ async def _get_all_internal_networks(client: SecureAccessClient) -> list[dict[st
 
 async def _get_all_network_tunnels(client: SecureAccessClient) -> list[dict[str, Any]]:
     return await client.paginate_offset(DEPLOYMENTS_SCOPE, "networktunnelgroups", page_size=DEFAULT_PAGE_SIZE)
+
+
+_VALID_SORT_ORDERS = {"asc", "desc"}
+
+
+async def _get_all_private_resources(
+    client: SecureAccessClient,
+    *,
+    filters: dict[str, Any] | None = None,
+    sort_by: str | None = None,
+    sort_order: str | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    if sort_order is not None and sort_order.lower() not in _VALID_SORT_ORDERS:
+        raise ValueError(f"sort_order must be one of {sorted(_VALID_SORT_ORDERS)}, got {sort_order!r}")
+    params: dict[str, Any] = {}
+    if filters:
+        # API expects the filters query parameter as a JSON string.
+        params["filters"] = json.dumps(filters, separators=(",", ":"))
+    if sort_by:
+        params["sortBy"] = sort_by
+    if sort_order:
+        params["sortOrder"] = sort_order
+    max_items = _validate_private_resource_limit(limit)
+    page_size = min(DEFAULT_PAGE_SIZE, max_items) if max_items is not None else DEFAULT_PAGE_SIZE
+    return await client.paginate_offset(
+        POLICIES_SCOPE,
+        "privateResources",
+        params=params or None,
+        page_size=page_size,
+        max_page_size=MAX_PRIVATE_RESOURCE_LIMIT,
+        max_items=max_items,
+        data_key=("items", "data"),
+    )
 
 
 async def _reports_get(ctx: Context, path: str, params: dict[str, Any]) -> str:
@@ -1282,6 +1364,162 @@ async def get_activity_decryption(
     """Get recent SSL/TLS decryption activity events."""
     try:
         return await _reports_get(ctx, "/reports/v2/activity/decryption", _time_params(from_time, to_time, limit))
+    except Exception as e:
+        return format_error(e)
+
+
+# ============================================================================
+# Private Resource Management
+# ============================================================================
+
+
+@mcp.tool(annotations=READ_ONLY)
+async def list_private_resources(
+    ctx: Context,
+    filters: dict[str, Any] | None = None,
+    sort_by: str | None = None,
+    sort_order: str | None = None,
+    limit: int | None = None,
+) -> str:
+    """List private resources with optional filtering, sorting, and overall result limit."""
+    try:
+        resources = await _get_all_private_resources(
+            _get_client(ctx),
+            filters=filters,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            limit=limit,
+        )
+        return _json({"count": len(resources), "private_resources": resources})
+    except Exception as e:
+        return format_error(e)
+
+
+@mcp.tool(annotations=READ_ONLY)
+async def get_private_resource(resource_id: int, ctx: Context) -> str:
+    """Get details of a single private resource by its numeric ID."""
+    try:
+        data = await _get_client(ctx).get(POLICIES_SCOPE, f"privateResources/{resource_id}")
+        return _json(data)
+    except Exception as e:
+        return format_error(e)
+
+
+@mcp.tool(annotations=WRITE_CREATE)
+async def create_private_resource(
+    name: str,
+    access_types: list[dict[str, Any]],
+    resource_addresses: list[dict[str, Any]],
+    ctx: Context,
+    description: str | None = None,
+    dns_server_id: int | None = None,
+    certificate_id: int | None = None,
+    resource_group_ids: list[int] | None = None,
+) -> str:
+    """Create a new private resource."""
+    try:
+        body: dict[str, Any] = {
+            "name": _validate_private_resource_name(name),
+            "accessTypes": _validate_private_resource_access_types(access_types),
+            "resourceAddresses": _validate_private_resource_addresses(resource_addresses),
+        }
+        if description is not None:
+            body["description"] = description
+        if dns_server_id is not None:
+            body["dnsServerId"] = dns_server_id
+        if certificate_id is not None:
+            body["certificateId"] = certificate_id
+        if resource_group_ids is not None:
+            body["resourceGroupIds"] = resource_group_ids
+
+        data = await _get_client(ctx).post(POLICIES_SCOPE, "privateResources", json_data=body)
+        return _json(data)
+    except Exception as e:
+        return format_error(e)
+
+
+@mcp.tool(annotations=WRITE_UPDATE)
+async def update_private_resource(
+    resource_id: int,
+    ctx: Context,
+    name: str | None = None,
+    description: str | None = None,
+    dns_server_id: int | None = None,
+    certificate_id: int | None = None,
+    access_types: list[dict[str, Any]] | None = None,
+    resource_addresses: list[dict[str, Any]] | None = None,
+    resource_group_ids: list[int] | None = None,
+) -> str:
+    """Update properties on a private resource by ID."""
+    try:
+        body: dict[str, Any] = {}
+        if name is not None:
+            resolved_name = _validate_private_resource_name(name)
+        else:
+            current = await _get_client(ctx).get(POLICIES_SCOPE, f"privateResources/{resource_id}")
+            current_obj = current.get("data", current) if isinstance(current, dict) else {}
+            current_name = current_obj.get("name") if isinstance(current_obj, dict) else None
+            if not isinstance(current_name, str) or not current_name.strip():
+                raise ValueError("could not resolve current private resource name for update payload")
+            resolved_name = _validate_private_resource_name(current_name)
+
+        body["name"] = resolved_name
+        if description is not None:
+            body["description"] = description
+        if dns_server_id is not None:
+            body["dnsServerId"] = dns_server_id
+        if certificate_id is not None:
+            body["certificateId"] = certificate_id
+        if access_types is not None:
+            body["accessTypes"] = _validate_private_resource_access_types(access_types)
+        if resource_addresses is not None:
+            body["resourceAddresses"] = _validate_private_resource_addresses(resource_addresses)
+        if resource_group_ids is not None:
+            body["resourceGroupIds"] = resource_group_ids
+
+        if len(body) == 1:
+            raise ValueError("at least one update field must be provided")
+
+        data = await _get_client(ctx).request(
+            "PUT",
+            POLICIES_SCOPE,
+            f"privateResources/{resource_id}",
+            json_data=body,
+        )
+        return _json(data)
+    except Exception as e:
+        return format_error(e)
+
+
+@mcp.tool(annotations=DESTRUCTIVE)
+async def delete_private_resource(
+    resource_id: int,
+    ctx: Context,
+    force: bool = False,
+    confirm: bool = False,
+) -> str:
+    """Delete a private resource by ID. This action cannot be undone."""
+    try:
+        if REQUIRE_CONFIRMATION and not confirm:
+            preview = await _get_client(ctx).get(POLICIES_SCOPE, f"privateResources/{resource_id}")
+            target = preview.get("data", preview) if isinstance(preview, dict) else preview
+            return _json(
+                {
+                    "confirmationRequired": True,
+                    "action": "delete_private_resource",
+                    "warning": "This permanently deletes the private resource and cannot be undone.",
+                    "force": force,
+                    "target": target,
+                    "howToConfirm": "Call this tool again with confirm=true to proceed.",
+                }
+            )
+
+        data = await _get_client(ctx).delete(
+            POLICIES_SCOPE,
+            f"privateResources/{resource_id}",
+            params={"force": force},
+        )
+        return _json(data) if data else "Private resource deleted successfully."
     except Exception as e:
         return format_error(e)
 

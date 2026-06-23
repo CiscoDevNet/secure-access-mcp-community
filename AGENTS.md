@@ -4,7 +4,7 @@ This file provides guidance for AI coding agents (VS Code, GitHub Copilot, Curso
 
 ## Project overview
 
-`secure-access-mcp-community` is a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that exposes Cisco Secure Access API operations as agent-callable tools over **Streamable HTTP**. It provides 72 tools across destination list management, domain investigation, access policy inspection, reports, activity, and infrastructure inventory.
+`secure-access-mcp-community` is a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that exposes Cisco Secure Access API operations as agent-callable tools over **Streamable HTTP**. It provides 77 tools across destination list management, private resource management, domain investigation, access policy inspection, reports, activity, and infrastructure inventory.
 
 - **Repository:** https://github.com/CiscoDevNet/secure-access-mcp-community
 - **Protocol:** Streamable HTTP
@@ -85,7 +85,7 @@ See the `MCP Client Configuration` section of `README.md` and the `mcp_config.ex
 
 ## Testing instructions
 
-- **Local smoke test**: After starting the server, point MCP Inspector at `http://127.0.0.1:8000/mcp` and confirm the 72 tools are discoverable and that `list_destination_lists` returns successfully against your tenant.
+- **Local smoke test**: After starting the server, point MCP Inspector at `http://127.0.0.1:8000/mcp` and confirm the 77 tools are discoverable and that `list_destination_lists` returns successfully against your tenant.
 - **Test the code with the Cisco DevNet sandbox**: Visit https://devnetsandbox.cisco.com/DevNet and book the Cisco Secure Access related sandbox to obtain test credentials when you do not have access to a production tenant.
 - **Latest Cisco API documentation**: https://developer.cisco.com/docs/cloud-security/
 

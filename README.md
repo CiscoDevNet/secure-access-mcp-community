@@ -12,7 +12,7 @@ This server provides Cisco Secure Access tools for destination list management, 
 **Default URL:** `http://127.0.0.1:8000/mcp`  
 **Python:** 3.10+ (Python 3.11 or newer recommended)
 
-## Tools (72)
+## Tools (77)
 
 ### Destination Lists Management (Read)
 
@@ -127,6 +127,21 @@ This server provides Cisco Secure Access tools for destination list management, 
 | `get_activity_decryption` | SSL/TLS decryption activity |
 | `get_rules_activity` | Policy rule activity |
 | `get_unique_resources` | Count of unique private resources accessed |
+
+### Private Resource Management (Read)
+
+| Tool | Description |
+|------|-------------|
+| `list_private_resources` | List all private resources with optional filters and sorting |
+| `get_private_resource` | Get details of a single private resource by ID |
+
+### Private Resource Management (Write)
+
+| Tool | Description |
+|------|-------------|
+| `create_private_resource` | Create a new private resource |
+| `update_private_resource` | Update an existing private resource |
+| `delete_private_resource` | Delete a private resource |
 
 ### Infrastructure
 
@@ -370,7 +385,7 @@ Security middleware  (auth, rate limit, payload limit, request IDs, access logs)
 FastMCP server  (DNS-rebinding / Host + Origin validation)
    |
    v
-72 MCP tools  (input validation, destructive-action confirmation, optional PII redaction)
+77 MCP tools  (input validation, destructive-action confirmation, optional PII redaction)
    |
    v
 Async Secure Access client  (token cache/refresh, pooling, retries, audit logs)
