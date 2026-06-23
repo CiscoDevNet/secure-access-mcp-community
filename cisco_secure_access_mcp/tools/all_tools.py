@@ -129,21 +129,23 @@ def _extract_child_organizations(data: Any) -> list[dict[str, Any]]:
     organizations: list[dict[str, Any]] = []
     seen: set[str] = set()
     for item in data:
-        if not isinstance(item, dict):
+        if isinstance(item, dict):
+            org_id = _first_scalar(item, ("organizationId", "organization_id", "orgId", "org_id", "id"))
+            org_name = _first_scalar(
+                item,
+                ("organizationName", "organization_name", "orgName", "org_name", "name", "label"),
+            )
+        elif isinstance(item, (str, int)) and not isinstance(item, bool):
+            # The documented /admin/v2/tenants/lists endpoint returns a bare
+            # list of tenant organization IDs without names.
+            org_id = str(item).strip()
+            org_name = None
+        else:
             continue
-        org_id = _first_scalar(item, ("organizationId", "organization_id", "orgId", "org_id", "id"))
         if not org_id or org_id in seen:
             continue
         seen.add(org_id)
-        organizations.append(
-            {
-                "organizationId": org_id,
-                "organizationName": _first_scalar(
-                    item,
-                    ("organizationName", "organization_name", "orgName", "org_name", "name", "label"),
-                ),
-            }
-        )
+        organizations.append({"organizationId": org_id, "organizationName": org_name})
     return organizations
 
 
@@ -159,14 +161,11 @@ def _first_scalar(values: dict[str, Any], keys: tuple[str, ...]) -> str | None:
 
 
 async def _get_child_organizations(client: SecureAccessClient) -> list[dict[str, Any]]:
-    try:
-        data = await client.get(ADMIN_SCOPE, "tenants/list")
-    except SecureAccessAPIError as exc:
-        # Some early OpenAPI snapshots used /tenants/lists; keep this fallback
-        # narrow so real auth/permission/server errors are still visible.
-        if exc.status_code != 404:
-            raise
-        data = await client.get(ADMIN_SCOPE, "tenants/lists")
+    # The documented Multi-Tenants API endpoint is /admin/v2/tenants/lists.
+    # Passing optionalFields=["organizationName", "includeUmbrellaOrgs"] makes it
+    # return full objects (id + name) instead of a bare list of IDs.
+    params = {"optionalFields": '["organizationName","includeUmbrellaOrgs"]'}
+    data = await client.get(ADMIN_SCOPE, "tenants/lists", params=params)
     return _extract_child_organizations(data)
 
 
@@ -243,7 +242,10 @@ def _time_params(from_time: str, to_time: str, limit: int | None = None) -> dict
 
 @mcp.tool(annotations=READ_ONLY)
 async def list_child_organizations(ctx: Context) -> str:
-    """List child tenant organizations accessible from parent/provider credentials."""
+    """List child tenant organizations accessible from parent/provider credentials.
+
+    Each entry includes both ``organizationId`` and ``organizationName``.
+    """
     try:
         organizations = await _get_child_organizations(_get_client(ctx))
         return _json({"count": len(organizations), "child_organizations": organizations})
