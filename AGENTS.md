@@ -95,7 +95,7 @@ The server depends on a small, well-known stack. When suggesting changes, stay o
 
 | Package | Purpose | Minimum version |
 |---------|---------|-----------------|
-| `mcp[cli]` | Model Context Protocol Python SDK (FastMCP) | `>=1.0.0` |
+| `mcp[cli]` | Model Context Protocol Python SDK (MCPServer) | `>=2,<3` |
 | `httpx` | Async HTTP client used by `client.py` | `>=0.27.0` |
 | `pydantic` | Tool input models in `tools/destination_lists.py` | `>=2.0.0` |
 | `python-dotenv` | Loads `.env` files for local development | `>=1.0.0` |
@@ -110,7 +110,7 @@ cisco_secure_access_mcp/
 ├── client.py            # Async Cisco Secure Access REST client (httpx pool, retries, paginate, audit logs)
 ├── logging_config.py    # Structured JSON logging + secret redaction
 ├── security.py          # Transport security: auth, rate limit, payload limit, request IDs (ASGI middleware)
-├── server.py            # FastMCP Streamable HTTP server + security wiring
+├── server.py            # MCPServer Streamable HTTP server + security wiring
 └── tools/
     ├── all_tools.py     # MCP tool definitions
     └── destination_lists.py
@@ -140,7 +140,7 @@ The Streamable HTTP transport is hardened in `security.py` (pure-ASGI `SecurityM
 
 - **Auth is required by default.** `SecurityConfig.from_env()` refuses to start without `MCP_AUTH_TOKEN` unless `MCP_ALLOW_NO_AUTH=true` (the documented, not-recommended testing mode, which is additionally rejected on non-loopback hosts). Token comparison uses `hmac.compare_digest`. Do not weaken default-deny.
 - **Middleware order matters**: rate limit → payload-size limit → auth, then the app, with access logging in `finally`. It is pure ASGI on purpose — do not switch to Starlette `BaseHTTPMiddleware`, which buffers and breaks the streaming response.
-- **DNS-rebinding protection** is delegated to FastMCP `transport_security` (configured in `server.py::_build_transport_security`). Keep it enabled.
+- **DNS-rebinding protection** is delegated to MCPServer `transport_security` (built in `server.py::_build_transport_security` and passed to `mcp.streamable_http_app(transport_security=..., host=...)`; mcp 2.x removed the mutable `mcp.settings` object). Keep it enabled.
 - **Logging**: use the package logger from `logging_config.get_logger()` and pass structured fields via `extra=`. The `RedactionFilter` scrubs secrets; never log tokens, `Authorization`, query strings, or PII. Audit Cisco API calls in `client.py` by path only.
 - **Destructive tools** must carry the `DESTRUCTIVE` annotation preset and honor the `REQUIRE_CONFIRMATION` two-stage commit (`confirm=true`). New write tools should validate inputs server-side with the `_validate_*` helpers (or pydantic) and use the appropriate annotation preset (`READ_ONLY` / `WRITE_CREATE` / `WRITE_UPDATE` / `DESTRUCTIVE`).
 - **PII redaction** for report/activity outputs goes through `_maybe_redact` (gated by `SECURE_ACCESS_REDACT_PII`).

@@ -147,7 +147,7 @@ secure-access-mcp-community/
 │   ├── client.py            # Async Cisco Secure Access REST client (pool, retries, paginate, audit logs)
 │   ├── logging_config.py    # Structured JSON logging + secret redaction
 │   ├── security.py          # Auth, rate limit, payload limit, request IDs (ASGI middleware)
-│   ├── server.py            # FastMCP Streamable HTTP server + security wiring
+│   ├── server.py            # MCPServer Streamable HTTP server + security wiring
 │   └── tools/
 │       ├── all_tools.py     # MCP tool definitions
 │       └── destination_lists.py
@@ -367,7 +367,7 @@ MCP client
 Security middleware  (auth, rate limit, payload limit, request IDs, access logs)
    |
    v
-FastMCP server  (DNS-rebinding / Host + Origin validation)
+MCPServer  (DNS-rebinding / Host + Origin validation)
    |
    v
 72 MCP tools  (input validation, destructive-action confirmation, optional PII redaction)
@@ -383,7 +383,7 @@ Cisco Secure Access API
 
 - **Client→server authentication (required by default).** Every request must carry `Authorization: Bearer <MCP_AUTH_TOKEN>`; the token is compared in constant time. The server refuses to start without either `MCP_AUTH_TOKEN` or the explicit `MCP_ALLOW_NO_AUTH=true` testing flag.
 - **No-auth testing mode (not recommended).** `MCP_ALLOW_NO_AUTH=true` runs without authentication for isolated local testing only; it is rejected on non-loopback hosts and prints/logs a prominent warning.
-- **DNS-rebinding protection.** Host/Origin validation via FastMCP `transport_security`, defaulting to the bound host plus loopback names (`MCP_ALLOWED_HOSTS` / `MCP_ALLOWED_ORIGINS`).
+- **DNS-rebinding protection.** Host/Origin validation via MCPServer `transport_security`, defaulting to the bound host plus loopback names (`MCP_ALLOWED_HOSTS` / `MCP_ALLOWED_ORIGINS`).
 - **DoS protections.** Inbound payload size cap (`MCP_MAX_REQUEST_BYTES`) and per-client-IP rate limiting (`MCP_RATE_LIMIT_RPM`).
 - **Auditability.** Structured JSON logs (stderr) with per-request correlation IDs (`X-Request-ID`) for transport requests and outbound Cisco API calls. A redaction filter keeps credentials/tokens out of logs.
 - **Safer tools.** Destructive tools (`delete_destination_list`, `remove_destinations_from_list`) use two-stage commit (`confirm=true`) and carry `destructiveHint` annotations; write tools validate inputs server-side (allowlists, length/count caps). Optional PII redaction for report/activity outputs via `SECURE_ACCESS_REDACT_PII`.
