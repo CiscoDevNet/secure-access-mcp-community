@@ -11,7 +11,7 @@ import time
 from datetime import datetime
 from typing import Any
 
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
 
 from ..client import API_BASE_URL, SecureAccessClient, compact_json, format_error
 from ..server import AppContext, mcp

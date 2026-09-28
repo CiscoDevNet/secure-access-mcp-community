@@ -1,4 +1,7 @@
-mcp[cli]>=1.0.0
+# The server targets the mcp 2.x MCPServer API
+# (`from mcp.server import MCPServer`, `from mcp.server.mcpserver import Context`).
+# Pinned <3 so a future major (3.x) can't silently break imports on fresh installs.
+mcp[cli]>=2,<3
 httpx>=0.27.0
 pydantic>=2.0.0
 python-dotenv>=1.0.0

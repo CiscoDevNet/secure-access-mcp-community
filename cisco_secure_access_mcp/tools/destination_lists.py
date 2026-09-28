@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 from typing import Optional
 
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..client import SecureAccessClient, compact_json, format_error

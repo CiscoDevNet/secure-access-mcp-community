@@ -14,7 +14,7 @@ guidelines:
 * Correlation IDs (``X-Request-ID``) propagated to responses and logs.
 * Structured access logging for every request.
 
-DNS-rebinding / Host / Origin validation is delegated to FastMCP's built-in
+DNS-rebinding / Host / Origin validation is delegated to MCPServer's built-in
 ``transport_security`` (configured in ``server.py``).
 
 The middleware is implemented as pure ASGI (not Starlette ``BaseHTTPMiddleware``)

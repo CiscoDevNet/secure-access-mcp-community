@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
 from .auth import TokenManager
@@ -32,7 +32,7 @@ class AppContext:
 
 
 @asynccontextmanager
-async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
+async def app_lifespan(server: MCPServer) -> AsyncIterator[AppContext]:
     """Initialize the Secure Access API client for the server lifetime."""
     api_key = os.environ.get("SECURE_ACCESS_API_KEY", "")
     api_secret = os.environ.get("SECURE_ACCESS_API_SECRET", "")
@@ -67,7 +67,7 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
         await client.aclose()
 
 
-mcp = FastMCP(
+mcp = MCPServer(
     "cisco-secure-access-mcp",
     lifespan=app_lifespan,
 )
@@ -77,7 +77,7 @@ from .tools import all_tools  # noqa: E402, F401
 
 
 def _build_transport_security(host: str, port: int, config: SecurityConfig) -> TransportSecuritySettings:
-    """Configure FastMCP's DNS-rebinding / Host / Origin validation."""
+    """Configure MCPServer's DNS-rebinding / Host / Origin validation."""
     allowed_hosts = list(config.allowed_hosts)
     if not allowed_hosts:
         # Default to the bound host plus loopback names so a correctly addressed
@@ -124,11 +124,14 @@ def main() -> None:
 
     logger.info("starting server", extra={"event": "startup", **security.public_summary()})
 
-    mcp.settings.host = host
-    mcp.settings.port = port
-    mcp.settings.transport_security = _build_transport_security(host, port, security)
-
-    app = mcp.streamable_http_app()
+    # mcp 2.x removed the mutable ``mcp.settings`` object: transport security and
+    # the bound host are passed directly to ``streamable_http_app``.  The port is
+    # applied by uvicorn below.  The Streamable HTTP endpoint stays at ``/mcp``
+    # (the ``streamable_http_path`` default).
+    app = mcp.streamable_http_app(
+        transport_security=_build_transport_security(host, port, security),
+        host=host,
+    )
     app.add_middleware(SecurityMiddleware, config=security)
 
     import uvicorn
