@@ -13,9 +13,10 @@ from typing import Any
 
 from mcp.server.mcpserver import Context
 
-from ..client import API_BASE_URL, SecureAccessClient, compact_json, format_error
+from ..client import API_BASE_URL, SecureAccessAPIError, SecureAccessClient, compact_json, format_error
 from ..server import AppContext, mcp
 
+ADMIN_SCOPE = "admin/v2"
 POLICIES_SCOPE = "policies/v2"
 REPORTS_SCOPE = "reports/v2"
 SECURITY_SCOPE = "security/v1"
@@ -115,6 +116,77 @@ def _maybe_redact(data: Any) -> Any:
     return _redact_pii(data) if REDACT_PII else data
 
 
+def _extract_child_organizations(data: Any) -> list[dict[str, Any]]:
+    if isinstance(data, dict):
+        for key in ("data", "items", "results", "tenants", "organizations", "orgs"):
+            organizations = _extract_child_organizations(data.get(key))
+            if organizations:
+                return organizations
+        data = [data]
+    if not isinstance(data, list):
+        return []
+
+    organizations: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in data:
+        if isinstance(item, dict):
+            org_id = _first_scalar(item, ("organizationId", "organization_id", "orgId", "org_id", "id"))
+            org_name = _first_scalar(
+                item,
+                ("organizationName", "organization_name", "orgName", "org_name", "name", "label"),
+            )
+        elif isinstance(item, (str, int)) and not isinstance(item, bool):
+            # The documented /admin/v2/tenants/lists endpoint returns a bare
+            # list of tenant organization IDs without names.
+            org_id = str(item).strip()
+            org_name = None
+        else:
+            continue
+        if not org_id or org_id in seen:
+            continue
+        seen.add(org_id)
+        organizations.append({"organizationId": org_id, "organizationName": org_name})
+    return organizations
+
+
+def _first_scalar(values: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    values_by_key = {str(key).lower(): value for key, value in values.items()}
+    for key in keys:
+        value = values_by_key.get(key.lower())
+        if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+            text = str(value).strip()
+            if text:
+                return text
+    return None
+
+
+async def _get_child_organizations(client: SecureAccessClient) -> list[dict[str, Any]]:
+    # The documented Multi-Tenants API endpoint is /admin/v2/tenants/lists.
+    # Passing optionalFields=["organizationName", "includeUmbrellaOrgs"] makes it
+    # return full objects (id + name) instead of a bare list of IDs.
+    params = {"optionalFields": '["organizationName","includeUmbrellaOrgs"]'}
+    data = await client.get(ADMIN_SCOPE, "tenants/lists", params=params)
+    return _extract_child_organizations(data)
+
+
+def _validate_report_path(path: str) -> str:
+    cleaned = "/" + path.strip().lstrip("/")
+    if not cleaned.startswith("/reports/v2/") or "://" in cleaned or ".." in cleaned:
+        raise ValueError("report_path must be a relative Secure Access Reports API path under /reports/v2/")
+    return cleaned
+
+
+def _summarize_destination_list(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": item.get("id"),
+        "name": item.get("name"),
+        "access": item.get("access"),
+        "destinationCount": item.get("destinationCount") or item.get("meta", {}).get("destinationCount"),
+        "isGlobal": item.get("isGlobal"),
+        "createdAt": item.get("createdAt"),
+    }
+
+
 async def _get_all_destination_lists(client: SecureAccessClient) -> list[dict[str, Any]]:
     return await client.paginate(POLICIES_SCOPE, "destinationlists", page_size=DEFAULT_PAGE_SIZE)
 
@@ -164,6 +236,99 @@ def _time_params(from_time: str, to_time: str, limit: int | None = None) -> dict
 
 
 # ============================================================================
+# Multi-Tenant Organizations
+# ============================================================================
+
+
+@mcp.tool(annotations=READ_ONLY)
+async def list_child_organizations(ctx: Context) -> str:
+    """List child tenant organizations accessible from parent/provider credentials.
+
+    Each entry includes both ``organizationId`` and ``organizationName``.
+    """
+    try:
+        organizations = await _get_child_organizations(_get_client(ctx))
+        return _json({"count": len(organizations), "child_organizations": organizations})
+    except Exception as e:
+        return format_error(e)
+
+
+@mcp.tool(annotations=READ_ONLY)
+async def list_multi_org_destination_lists(ctx: Context) -> str:
+    """List destination-list summaries for every child organization.
+
+    The server first lists child organizations with the parent/provider token,
+    then mints a separate child-scoped token for each organization by adding
+    ``X-Umbrella-OrgId`` to the token request. Results are grouped by
+    ``organizationId`` so callers can see exactly which tenant each result
+    came from.
+    """
+    parent_client = _get_client(ctx)
+    try:
+        organizations = await _get_child_organizations(parent_client)
+        results: list[dict[str, Any]] = []
+        for organization in organizations:
+            org_id = organization["organizationId"]
+            child_client = parent_client.for_org(org_id)
+            try:
+                all_lists = await _get_all_destination_lists(child_client)
+                results.append(
+                    {
+                        **organization,
+                        "status": "ok",
+                        "count": len(all_lists),
+                        "destination_lists": [_summarize_destination_list(item) for item in all_lists],
+                    }
+                )
+            except Exception as exc:
+                results.append({**organization, "status": "error", "error": format_error(exc)})
+            finally:
+                if child_client is not parent_client:
+                    await child_client.aclose()
+        return _json({"count": len(results), "organizations": results})
+    except Exception as e:
+        return format_error(e)
+
+
+@mcp.tool(annotations=READ_ONLY)
+async def get_multi_org_report(
+    report_path: str,
+    from_time: str,
+    to_time: str,
+    ctx: Context,
+    limit: int | None = None,
+) -> str:
+    """Run a Secure Access Reports API GET request for every child organization.
+
+    ``report_path`` must be under ``/reports/v2/``, for example
+    ``/reports/v2/top-categories`` or ``/reports/v2/activity/proxy``. The
+    server lists child organizations, mints a child-scoped token for each one
+    using ``X-Umbrella-OrgId``, and returns one result object per
+    ``organizationId``.
+    """
+    parent_client = _get_client(ctx)
+    try:
+        path = _validate_report_path(report_path)
+        organizations = await _get_child_organizations(parent_client)
+        params = _time_params(from_time, to_time, limit)
+        results: list[dict[str, Any]] = []
+        for organization in organizations:
+            org_id = organization["organizationId"]
+            child_client = parent_client.for_org(org_id)
+            try:
+                data = await child_client.request_url("GET", f"{API_BASE_URL}{path}", params=params)
+                results.append({**organization, "status": "ok", "result": _maybe_redact(data)})
+            except Exception as exc:
+                results.append({**organization, "status": "error", "error": format_error(exc)})
+            finally:
+                if child_client is not parent_client:
+                    await child_client.aclose()
+        return _json({"reportPath": path, "count": len(results), "organizations": results})
+    except Exception as e:
+        return format_error(e)
+
+
+# ============================================================================
 # Destination Lists
 # ============================================================================
 
@@ -173,17 +338,7 @@ async def list_destination_lists(ctx: Context) -> str:
     """List all destination lists in the organization."""
     try:
         all_lists = await _get_all_destination_lists(_get_client(ctx))
-        summary = [
-            {
-                "id": item.get("id"),
-                "name": item.get("name"),
-                "access": item.get("access"),
-                "destinationCount": item.get("destinationCount") or item.get("meta", {}).get("destinationCount"),
-                "isGlobal": item.get("isGlobal"),
-                "createdAt": item.get("createdAt"),
-            }
-            for item in all_lists
-        ]
+        summary = [_summarize_destination_list(item) for item in all_lists]
         return _json({"count": len(summary), "destination_lists": summary})
     except Exception as e:
         return format_error(e)

@@ -2,6 +2,7 @@ import unittest
 from typing import Any
 from unittest.mock import patch
 
+from cisco_secure_access_mcp.auth import TokenManager
 from cisco_secure_access_mcp.client import SecureAccessClient
 
 
@@ -22,6 +23,24 @@ class RecordingClient(SecureAccessClient):
 
 
 class PaginationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_for_org_returns_child_scoped_client_with_separate_token_manager(self) -> None:
+        parent_token_manager = TokenManager(
+            api_key="api-key",
+            api_secret="api-secret",
+            token_url="https://api.sse.cisco.com/auth/v2/token",
+        )
+        parent = SecureAccessClient(parent_token_manager, max_retries=2)
+
+        child = parent.for_org("1234567")
+
+        self.assertIsNot(child, parent)
+        self.assertEqual(child.max_retries, 2)
+        self.assertEqual(child.token_manager.api_key, "api-key")
+        self.assertEqual(child.token_manager.api_secret, "api-secret")
+        self.assertEqual(child.token_manager.token_url, "https://api.sse.cisco.com/auth/v2/token")
+        self.assertEqual(child.token_manager.org_id, "1234567")
+        self.assertIsNone(parent.token_manager.org_id)
+
     async def test_page_pagination_stops_on_meta_total(self) -> None:
         client = RecordingClient(
             [
