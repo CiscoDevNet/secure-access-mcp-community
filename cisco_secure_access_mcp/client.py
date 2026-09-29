@@ -87,6 +87,30 @@ class SecureAccessClient:
         self._http: httpx.AsyncClient | None = None
         self._http_lock = asyncio.Lock()
 
+    def for_org(self, org_id: int | str) -> "SecureAccessClient":
+        """Return a client that mints tokens scoped to a child organization.
+
+        Multi-org/provider credentials are created in the parent organization,
+        but Cisco requires token requests for child organizations to include
+        ``X-Umbrella-OrgId``.  Each child client has an independent token cache
+        so calls for one child organization cannot accidentally reuse another
+        child's bearer token.
+        """
+        normalized_org_id = str(org_id).strip()
+        if not normalized_org_id:
+            raise ValueError("org_id must not be empty")
+        if self.token_manager.org_id == normalized_org_id:
+            return self
+        return SecureAccessClient(
+            TokenManager(
+                api_key=self.token_manager.api_key,
+                api_secret=self.token_manager.api_secret,
+                token_url=self.token_manager.token_url,
+                org_id=normalized_org_id,
+            ),
+            max_retries=self.max_retries,
+        )
+
     async def _get_http(self) -> httpx.AsyncClient:
         if self._http is None:
             async with self._http_lock:

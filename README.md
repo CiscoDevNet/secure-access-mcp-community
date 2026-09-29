@@ -12,7 +12,15 @@ This server provides Cisco Secure Access tools for destination list management, 
 **Default URL:** `http://127.0.0.1:8000/mcp`  
 **Python:** 3.10+ (Python 3.11 or newer recommended)
 
-## Tools (72)
+## Tools (75)
+
+### Multi-Tenant Organizations
+
+| Tool | Description |
+|------|-------------|
+| `list_child_organizations` | List child tenant organizations available to parent/provider credentials |
+| `list_multi_org_destination_lists` | List destination-list summaries for every child organization, grouped by organization ID |
+| `get_multi_org_report` | Run a Reports API GET request for every child organization, grouped by organization ID |
 
 ### Destination Lists Management (Read)
 
@@ -239,6 +247,22 @@ cp .env.example .env
 | `SECURE_ACCESS_REQUIRE_CONFIRMATION` | No | `true` | Require `confirm=true` for destructive tools (two-stage commit) |
 | `SECURE_ACCESS_REDACT_PII` | No | `false` | Redact PII (identities, IPs, emails) from report/activity outputs |
 | `LOG_LEVEL` | No | `INFO` | Level for structured JSON logs (written to stderr) |
+
+### Multi-Tenant / Managed Child Organizations
+
+For multi-org or managed child-organization environments, create the API credentials in the parent/provider organization. The multi-tenant tools first call the Secure Access Multi-Tenants API to list child organizations, then mint a separate token for each child organization using the documented `X-Umbrella-OrgId: <child organizationId>` token-request header. Each response object is grouped by `organizationId` and includes the `organizationName` when Cisco returns it.
+
+Required Cisco scope for child-org discovery:
+
+- `admin.tenants:read`
+
+Examples:
+
+```text
+list_child_organizations
+list_multi_org_destination_lists
+get_multi_org_report(report_path="/reports/v2/top-categories", from_time="-24hours", to_time="now", limit=10)
+```
 
 ## Usage
 

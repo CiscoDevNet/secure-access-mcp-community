@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 # Default User-Agent sent on every Cisco Secure Access API request (token and
 # data calls).  The Cisco backend uses this string to attribute traffic to this
